@@ -1,103 +1,138 @@
+<div align="center">
+
 # QQ AI Bot
 
-基于 [NoneBot2](https://nonebot.dev/) 与 OneBot v11 的 QQ 机器人，通常配合 [NapCatQQ](https://github.com/NapNeko/NapCatQQ) 使用。项目提供 OpenAI 兼容接口聊天，并集成角色扮演、知识问答、棋类游戏、一言、随机老婆和表情包等功能。
+<p align="center">
+  基于 NoneBot2 与 OneBot v11 的 QQ AI 机器人<br>
+  支持连续对话、角色扮演、知识问答、棋类游戏与表情包生成
+</p>
 
-> 仓库名中的 `claude` 为历史命名；当前聊天实现使用 OpenAI Python SDK，可通过 `OPENAI_BASE_URL` 接入兼容服务。
+<p align="center">
+  <img src="https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/NoneBot2-2.4%2B-EA5252" alt="NoneBot2 2.4+">
+  <img src="https://img.shields.io/badge/OneBot-v11-222222" alt="OneBot v11">
+  <a href="LICENSE"><img src="https://img.shields.io/github/license/xw9114/qq-claude-bot" alt="MIT License"></a>
+</p>
 
-## 功能
+<p align="center">
+  <a href="#功能一览">功能一览</a> ·
+  <a href="#快速开始">快速开始</a> ·
+  <a href="#配置说明">配置说明</a> ·
+  <a href="#工作原理">工作原理</a> ·
+  <a href="#常见问题">常见问题</a>
+</p>
 
-- AI 对话：问候后进入连续对话，也可直接 @机器人
-- 角色扮演：柯南、猫娘、古代谋士、毒舌导师
-- 娱乐功能：知识问答、塔罗牌、笑话、一言、随机老婆
-- 群聊游戏：五子棋、围棋、黑白棋
-- 图片功能：PetPet 与 Memes 表情包
-- `/help` 查看机器人内置帮助
+</div>
 
-## 环境要求
+---
 
-- Python 3.9+
-- 支持 OneBot v11 的 QQ 协议实现，例如 NapCatQQ
-- 一个 OpenAI 兼容 API 的密钥与 Base URL
+这个项目将 QQ 消息通过 [NapCatQQ](https://github.com/NapNeko/NapCatQQ) 转发给 [NoneBot2](https://nonebot.dev/)，再调用 OpenAI 兼容接口生成回复。除了 AI 对话，项目还加载了棋类、一言、随机老婆、PetPet 和 Memes 等 NoneBot 插件。
+
+> [!NOTE]
+> 仓库名中的 `claude` 是历史命名。当前实现使用 OpenAI Python SDK，可通过 `OPENAI_BASE_URL` 接入 OpenAI 或其他兼容服务。
+
+## 功能一览
+
+| 分类 | 功能 | 常用入口 |
+| --- | --- | --- |
+| AI 对话 | 连续对话、上下文记忆、@机器人直接提问 | `你好`、`再见`、@机器人 |
+| 角色扮演 | 柯南、猫娘、古代谋士、毒舌导师 | `/角色扮演`、`/退出角色` |
+| 知识问答 | AI 出题、提交答案、自动判定 | `/问答`、`/答案` |
+| 轻娱乐 | 塔罗牌、笑话、一言、随机老婆 | `/塔罗`、`/笑话`、`一言`、`/抽老婆` |
+| 棋类游戏 | 五子棋、围棋、黑白棋 | `/五子棋`、`/围棋`、`/黑白棋` |
+| 图片生成 | 头像互动 GIF 与文字梗图 | `摸 @某人`、`表情包制作` |
+
+在 QQ 中发送 `/help` 可以查看机器人内置的完整指令说明。
+
+## 工作原理
+
+```mermaid
+flowchart LR
+    QQ["QQ 用户"] -->|"消息"| NapCat["NapCatQQ<br>OneBot v11"]
+    NapCat -->|"反向 WebSocket"| NoneBot["NoneBot2"]
+    NoneBot --> Chat["AI 对话插件"]
+    NoneBot --> Plugins["娱乐与图片插件"]
+    Chat -->|"Chat Completions"| API["OpenAI 兼容 API"]
+    API -->|"回复"| Chat
+    Chat --> NoneBot --> NapCat --> QQ
+```
+
+项目本身负责 NoneBot 启动、OneBot 适配器注册和插件加载；QQ 登录与协议连接由 NapCatQQ 负责。
 
 ## 快速开始
 
-### 1. 安装依赖
+### 1. 准备环境
 
-Windows：
+- Python 3.9 或更高版本
+- 一个可用的 OpenAI 兼容 API Key
+- 支持 OneBot v11 的 QQ 协议实现，本项目推荐 NapCatQQ
+
+克隆仓库：
+
+```bash
+git clone https://github.com/xw9114/qq-claude-bot.git
+cd qq-claude-bot
+```
+
+### 2. 安装依赖
+
+<details open>
+<summary><strong>Windows</strong></summary>
 
 ```bat
 setup.bat
 ```
 
-Linux / macOS：
+</details>
+
+<details>
+<summary><strong>Linux / macOS</strong></summary>
 
 ```bash
 chmod +x setup.sh start.sh
 ./setup.sh
 ```
 
-也可以手动安装：
+</details>
 
-```bash
-python -m venv venv
-# Windows: venv\Scripts\activate
-# Linux/macOS: source venv/bin/activate
-python -m pip install -r requirements.txt
-```
+安装脚本会创建 `venv`、安装 `requirements.txt`，并在本地不存在 `.env` 时复制配置模板。
 
-### 2. 配置环境变量
+### 3. 配置 API
 
-复制配置模板：
-
-```bash
-cp .env.example .env
-```
-
-Windows 可使用：
-
-```bat
-copy .env.example .env
-```
-
-至少填写：
+打开项目根目录下的 `.env`，至少填写：
 
 ```env
 OPENAI_API_KEY=your-api-key
 OPENAI_BASE_URL=https://api.openai.com/v1
 ```
 
-`.env` 包含密钥，已被 Git 忽略，请勿提交。
+`.env` 已被 Git 忽略。请勿将真实密钥写入 README、截图、Issue 或提交记录。
 
-### 3. 配置 NapCatQQ
+### 4. 连接 NapCatQQ
 
-1. 安装并登录 NapCatQQ。
+1. 安装并登录 [NapCatQQ](https://github.com/NapNeko/NapCatQQ/releases)。
 2. 新建 OneBot v11 反向 WebSocket（Universal）连接。
-3. 将 URL 设置为 `ws://127.0.0.1:8080/onebot/v11/ws`。
-4. 确认 `.env` 中的 `HOST` 与 `PORT` 和该 URL 一致。
+3. 将连接地址设为：
 
-### 4. 启动
-
-Windows：
-
-```bat
-start.bat
+```text
+ws://127.0.0.1:8080/onebot/v11/ws
 ```
 
-Linux / macOS：
+如果修改了 `.env` 中的 `HOST` 或 `PORT`，需要同步修改该地址。
 
-```bash
-./start.sh
-```
+### 5. 启动机器人
 
-也可以在虚拟环境中直接运行：
+| 系统 | 命令 |
+| --- | --- |
+| Windows | `start.bat` |
+| Linux / macOS | `./start.sh` |
+| 已激活虚拟环境 | `python bot.py` |
 
-```bash
-python bot.py
-```
-
-启动后，在 QQ 中发送“你好”或 @机器人即可开始对话。
+看到 OneBot 连接日志后，在 QQ 中发送“你好”或 @机器人即可开始对话。
 
 ## 配置说明
+
+配置模板位于 [`.env.example`](.env.example)。
 
 | 配置项 | 必填 | 默认值 | 说明 |
 | --- | --- | --- | --- |
@@ -109,19 +144,19 @@ python bot.py
 | `COMMAND_START` | 否 | `["/"]` | 命令前缀 |
 | `SUPERUSERS` | 否 | `[]` | 超级用户 QQ 号集合 |
 | `DATABASE_URL` | 否 | SQLite | 棋类等插件使用的数据库地址 |
-| `BOARDGAME_TIMEOUT` | 否 | `600` | 棋局超时时间（秒） |
+| `BOARDGAME_TIMEOUT` | 否 | `600` | 棋局超时时间，单位为秒 |
 
-当前 AI 模型在 `plugins/claude_chat.py` 中设置为 `gpt-5`。使用兼容服务时，请确认该服务提供同名模型，或按需修改模型名。
+当前 AI 模型在 [`plugins/claude_chat.py`](plugins/claude_chat.py) 中设置为 `gpt-5`。如果兼容服务没有同名模型，需要在该文件中修改模型名。
 
-## API 连通性测试
+### 检查 API 连通性
 
-配置好 `.env` 后运行：
+完成 `.env` 配置后运行：
 
 ```bash
 python test_api.py
 ```
 
-脚本只输出连接结果，不会打印 API Key。
+测试脚本不会输出 API Key，只会报告连接结果与模型回复。
 
 ## 项目结构
 
@@ -134,35 +169,45 @@ qq-claude-bot/
 ├── requirements.txt        # Python 依赖
 ├── setup.bat / setup.sh    # 环境初始化脚本
 ├── start.bat / start.sh    # 启动脚本
-└── test_api.py             # OpenAI 兼容接口连通性测试
+└── test_api.py             # API 连通性测试
 ```
 
-运行过程中生成的虚拟环境、日志、缓存、数据库和插件资源不会纳入 Git。
+虚拟环境、日志、缓存、数据库、插件资源和本地备份均不会纳入 Git。
 
 ## 常见问题
 
-### NapCat 已启动，但机器人没有收到消息
+<details>
+<summary><strong>NapCatQQ 已启动，但机器人没有收到消息</strong></summary>
 
-- 检查反向 WebSocket URL 是否为 `ws://127.0.0.1:8080/onebot/v11/ws`。
+- 确认反向 WebSocket URL 为 `ws://127.0.0.1:8080/onebot/v11/ws`。
 - 检查 NoneBot 日志中是否出现 OneBot 连接记录。
-- 如果修改了 `.env` 的 `HOST` 或 `PORT`，同步修改 NapCat 的连接 URL。
+- 确认 NapCatQQ 的连接类型是 OneBot v11 反向 WebSocket。
+- 如果修改过监听地址或端口，确保两端配置一致。
 
-### AI 功能提示“API 未配置”
+</details>
+
+<details>
+<summary><strong>AI 功能提示“API 未配置”</strong></summary>
 
 - 确认 `.env` 位于项目根目录。
-- 确认配置项名称是 `OPENAI_API_KEY`，而不是旧版的 `ANTHROPIC_API_KEY`。
-- 使用 `python test_api.py` 检查兼容接口是否可用。
+- 确认配置名是 `OPENAI_API_KEY`，不是旧版的 `ANTHROPIC_API_KEY`。
+- 运行 `python test_api.py` 检查接口和模型是否可用。
 
-### Memes 插件在 Windows 无报错退出
+</details>
+
+<details>
+<summary><strong>Memes 插件在 Windows 下无报错退出</strong></summary>
 
 安装 [Microsoft Visual C++ Redistributable](https://aka.ms/vs/17/release/VC_redist.x64.exe) 后重试。
+
+</details>
 
 ## 安全说明
 
 - 不要提交 `.env`、数据库、日志或包含密钥的压缩备份。
-- 如果密钥曾被上传到 GitHub，请立即在服务商后台撤销并重新生成。
-- 建议使用专门的机器人 QQ 账号，并遵守 QQ、NapCatQQ 和 API 服务商的使用规则。
+- 如果密钥曾进入公开提交，应立即在服务商后台撤销并重新生成。
+- 建议使用独立的机器人 QQ 账号，并遵守 QQ、NapCatQQ 与 API 服务商的使用规则。
 
 ## 许可证
 
-[MIT](LICENSE)
+本项目使用 [MIT License](LICENSE)。
