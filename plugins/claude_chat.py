@@ -5,7 +5,7 @@ from nonebot.rule import to_me, Rule
 from nonebot.log import logger
 from nonebot.exception import FinishedException
 from nonebot.params import CommandArg
-from openai import OpenAI
+from openai import AsyncOpenAI
 
 # 从环境变量获取 API Key 和 Base URL
 config = get_driver().config
@@ -16,7 +16,7 @@ if not api_key:
     logger.warning("未配置 OPENAI_API_KEY，ChatGPT 功能将不可用")
     client = None
 else:
-    client = OpenAI(api_key=api_key, base_url=base_url)
+    client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     logger.info(f"ChatGPT API 客户端初始化成功 (base_url: {base_url})")
 
 # 用户状态存储
@@ -120,7 +120,7 @@ async def handle_quiz(event: MessageEvent):
         await quiz_cmd.finish("❌ API 未配置")
         return
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model="gpt-5",
             messages=[{"role": "user", "content": "出一道有趣的知识问答题，格式：\n题目：xxx\n答案：xxx\n只输出这两行"}]
         )
@@ -149,7 +149,7 @@ async def handle_answer(event: MessageEvent, args: Message = CommandArg()):
         await answer_cmd.finish("请输入答案：/答案 xxx")
         return
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model="gpt-5",
             messages=[{"role": "user", "content": f"正确答案'{quiz_answers[user_id]}'，用户答'{user_answer}'，只回复：✅ 回答正确！或 ❌ 错误，答案是xxx"}]
         )
@@ -187,7 +187,7 @@ async def handle_tarot(event: MessageEvent):
     card = random.choice(TAROT_CARDS)
     position = "逆位" if random.choice([True, False]) else "正位"
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model="gpt-5",
             messages=[{"role": "user", "content": f"塔罗牌【{card}】{position}，神秘语气解读，50字以内"}]
         )
@@ -206,7 +206,7 @@ async def handle_joke(event: MessageEvent):
         await joke_cmd.finish("❌ API 未配置")
         return
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model="gpt-5",
             messages=[{"role": "user", "content": "讲一个简短笑话，有反转结尾，不超过80字"}]
         )
@@ -229,28 +229,51 @@ async def greet_rule(event: MessageEvent) -> bool:
         return False
     return any(kw in msg for kw in ["你好", "hello", "hi"])
 
-# 已开启对话且不是触发词、不是结束词
+# 聊天模式不应接管的插件指令。部分插件允许省略命令前缀，
+# 因此这里同时保留帮助中公开的裸指令入口。
 BLOCKED_KEYWORDS = {
+    # 娱乐
     "抽老婆", "随机老婆", "抽wife", "随机wife", "今日wife", "今日老婆",
-    "五子棋", "围棋", "黑白棋",
+    "塔罗", "占卜", "抽牌", "笑话", "joke", "一言", "一句",
+    # 表情包与梗图
+    "摸", "拍", "亲", "膜", "鲁迅说", "举牌", "petpet帮助", "表情帮助",
+    # 棋类游戏
+    "五子棋", "围棋", "黑白棋", "奥赛罗", "落子", "悔棋",
+    "显示棋盘", "显示棋局", "查看棋盘", "查看棋局",
+    "结束下棋", "结束游戏", "结束象棋", "跳过", "跳过回合",
+    "重载棋局", "恢复棋局",
 }
+
+
+def is_plugin_command(message: str) -> bool:
+    """判断消息是否应交给命令或功能插件处理。"""
+    msg = message.strip()
+    if msg.startswith("/"):
+        return True
+
+    for keyword in BLOCKED_KEYWORDS:
+        if not msg.startswith(keyword):
+            continue
+        suffix = msg[len(keyword):]
+        if not suffix or suffix[0].isspace():
+            return True
+
+    # 棋类开局指令支持紧跟执棋顺序，例如“五子棋后手”。
+    return any(
+        msg == f"{game}{order}"
+        for game in ("五子棋", "围棋", "黑白棋", "奥赛罗")
+        for order in ("先手", "执白", "后手", "执黑")
+    )
 
 async def active_rule(event: MessageEvent) -> bool:
     if event.user_id not in active_users:
         return False
     if await greet_rule(event) or await bye_rule(event):
         return False
-    msg = event.get_plaintext().strip()
-    if any(msg.lstrip("/").startswith(kw) for kw in BLOCKED_KEYWORDS):
-        return False
-    return True
+    return not is_plugin_command(event.get_plaintext())
 
 async def not_blocked(event: MessageEvent) -> bool:
-    msg = event.get_plaintext().strip()
-    # 以 / 开头的是命令，不应由聊天 AI 接管（让对应命令插件处理或静默忽略）
-    if msg.startswith("/"):
-        return False
-    return not any(msg.startswith(kw) for kw in BLOCKED_KEYWORDS)
+    return not is_plugin_command(event.get_plaintext())
 
 bye_chat = on_message(rule=Rule(bye_rule), priority=4, block=True)
 greet_chat = on_message(rule=Rule(greet_rule), priority=5, block=True)
@@ -295,7 +318,9 @@ async def process_chat(matcher, bot: Bot, event: MessageEvent):
         # 构建完整消息列表
         messages = [{"role": "system", "content": system}] + user_history[user_id]
 
-        response = client.chat.completions.create(model="gpt-5", messages=messages)
+        response = await client.chat.completions.create(
+            model="gpt-5", messages=messages
+        )
         reply = response.choices[0].message.content
 
         # 保存助手回复到历史
