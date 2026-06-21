@@ -1,13 +1,17 @@
 from nonebot import on_message, on_command, get_driver
 import random
-from nonebot.adapters.onebot.v11 import Bot, MessageEvent, Message
+from nonebot.adapters.onebot.v11 import Bot, MessageEvent, Message, MessageSegment
 from nonebot.rule import to_me, Rule
 from nonebot.log import logger
 from nonebot.exception import FinishedException
 from nonebot.params import CommandArg
 from openai import AsyncOpenAI
 
-from .user_titles import get_mentioned_titles_prompt, get_user_title_prompt
+from .user_titles import (
+    get_mentioned_title_records,
+    get_mentioned_titles_prompt,
+    get_user_title_prompt,
+)
 
 # 从环境变量获取 API Key 和 Base URL
 config = get_driver().config
@@ -290,6 +294,20 @@ greet_chat = on_message(rule=Rule(greet_rule), priority=5, block=True)
 chat_at = on_message(rule=to_me() & Rule(not_blocked), priority=15, block=True)
 active_chat = on_message(rule=Rule(active_rule), priority=16, block=True)
 
+
+def build_chat_reply_message(
+    reply: str,
+    event: MessageEvent,
+    mentioned_title_records,
+) -> Message:
+    reply_message = Message(reply)
+    if getattr(event, "group_id", None) is None or not mentioned_title_records:
+        return reply_message
+
+    target_id = mentioned_title_records[0].user_id
+    return MessageSegment.at(target_id) + " " + reply_message
+
+
 async def process_chat(matcher, bot: Bot, event: MessageEvent):
     if not client:
         await matcher.finish("❌ API 未配置")
@@ -317,8 +335,13 @@ async def process_chat(matcher, bot: Bot, event: MessageEvent):
         system = SYSTEM_PROMPT
         if user_modes.get(user_id) == "roleplay" and user_id in user_roles:
             system = user_roles[user_id]
-        system += await get_user_title_prompt(user_id)
-        system += await get_mentioned_titles_prompt(user_msg)
+        system += await get_user_title_prompt(user_id, bot, event)
+        mentioned_title_records = await get_mentioned_title_records(
+            user_msg, bot, event
+        )
+        system += await get_mentioned_titles_prompt(
+            user_msg, bot, event, mentioned_title_records
+        )
 
         # 初始化历史
         if user_id not in user_history:
@@ -343,7 +366,9 @@ async def process_chat(matcher, bot: Bot, event: MessageEvent):
             user_history[user_id] = user_history[user_id][-MAX_HISTORY * 2:]
 
         logger.info(f"回复: {reply[:80]}...")
-        await matcher.finish(Message(reply))
+        await matcher.finish(
+            build_chat_reply_message(reply, event, mentioned_title_records)
+        )
     except FinishedException:
         pass
     except Exception as e:
