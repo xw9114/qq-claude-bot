@@ -28,14 +28,16 @@ else:
     client = AsyncOpenAI(api_key=api_key, base_url=base_url)
     logger.info(f"ChatGPT API 客户端初始化成功 (base_url: {base_url})")
 
-# 用户状态存储
+# 会话状态存储。群聊按“群 + 用户”隔离，私聊按用户隔离，避免跨群/跨私聊串记忆。
 user_modes = {}      # "chat" / "roleplay" / "quiz"
 user_roles = {}      # 角色扮演设定
 quiz_answers = {}    # 问答答案
-active_users = set() # 已开启对话的用户
-user_history = {}    # 用户对话历史
+active_users = set() # 已开启对话的会话
+user_history = {}    # 会话对话历史
+recent_image_signatures = {}  # 群/私聊范围内最近识别过的图片
 
 MAX_HISTORY = 10     # 最多保留10轮对话
+MAX_RECENT_IMAGE_SIGNATURES = 50
 
 # 系统提示词（QQ群聊风格）
 SYSTEM_PROMPT = """你正在 QQ 群里自然聊天，不是客服、说明书或搜索引擎。
@@ -43,6 +45,7 @@ SYSTEM_PROMPT = """你正在 QQ 群里自然聊天，不是客服、说明书或
 普通闲聊控制在 1-3 句，口语、松弛，可以轻度吐槽和接梗，但不要硬玩梗、尬夸或说教。
 认真问题直接给可执行答案；信息不足时先指出关键缺口，再给一个最可能的判断。
 当用户发送图片时，你可以直接观察图片内容；如果图片无法访问，再根据图片说明和上下文说明限制。
+历史消息只属于当前会话里的当前发言用户；不要把某人的“我……”归因给其他人。
 避免模板化开场、频繁感叹号和过量 emoji。"""
 
 # 角色预设
@@ -55,6 +58,19 @@ ROLES = {
 
 # ========== 帮助指令 ==========
 help_cmd = on_command("help", aliases={"帮助"}, priority=3, block=True)
+
+
+def conversation_key(event: MessageEvent) -> tuple[str, int, int | None]:
+    """同一用户在不同群/私聊中使用独立上下文。"""
+    group_id = getattr(event, "group_id", None)
+    if group_id is not None:
+        return ("group", event.user_id, group_id)
+    return ("private", event.user_id, None)
+
+
+def image_cache_key(event: MessageEvent) -> tuple[str, int | None]:
+    group_id = getattr(event, "group_id", None)
+    return ("group", group_id) if group_id is not None else ("private", event.user_id)
 
 @help_cmd.handle()
 async def handle_help(event: MessageEvent):
@@ -121,15 +137,17 @@ roleplay_cmd = on_command("角色扮演", priority=3, block=True)
 
 @roleplay_cmd.handle()
 async def handle_roleplay(event: MessageEvent):
-    user_modes[event.user_id] = "selecting_role"
+    session_key = conversation_key(event)
+    user_modes[session_key] = "selecting_role"
     await roleplay_cmd.finish(Message("🎭 选择角色：\n1️⃣ 侦探柯南\n2️⃣ 猫娘\n3️⃣ 古代谋士\n4️⃣ 毒舌导师\n\n回复数字选择"))
 
 exit_role_cmd = on_command("退出角色", priority=3, block=True)
 
 @exit_role_cmd.handle()
 async def handle_exit_role(event: MessageEvent):
-    user_modes.pop(event.user_id, None)
-    user_roles.pop(event.user_id, None)
+    session_key = conversation_key(event)
+    user_modes.pop(session_key, None)
+    user_roles.pop(session_key, None)
     await exit_role_cmd.finish("✅ 已退出角色扮演")
 
 # ========== 问答竞赛 ==========
@@ -149,8 +167,9 @@ async def handle_quiz(event: MessageEvent):
         lines = text.strip().split("\n")
         question = lines[0].replace("题目：", "").strip()
         answer = lines[1].replace("答案：", "").strip()
-        user_modes[event.user_id] = "quiz"
-        quiz_answers[event.user_id] = answer
+        session_key = conversation_key(event)
+        user_modes[session_key] = "quiz"
+        quiz_answers[session_key] = answer
         await quiz_cmd.finish(Message(f"🧠 问答开始！\n\n❓ {question}\n\n用 /答案 [你的答案] 回答"))
     except FinishedException:
         pass
@@ -161,8 +180,8 @@ answer_cmd = on_command("答案", priority=3, block=True)
 
 @answer_cmd.handle()
 async def handle_answer(event: MessageEvent, args: Message = CommandArg()):
-    user_id = event.user_id
-    if user_modes.get(user_id) != "quiz":
+    session_key = conversation_key(event)
+    if user_modes.get(session_key) != "quiz":
         await answer_cmd.finish("❌ 未开始问答，发送 /问答 开始")
         return
     user_answer = args.extract_plain_text().strip()
@@ -172,11 +191,11 @@ async def handle_answer(event: MessageEvent, args: Message = CommandArg()):
     try:
         response = await client.chat.completions.create(
             model=model_name,
-            messages=[{"role": "user", "content": f"正确答案'{quiz_answers[user_id]}'，用户答'{user_answer}'，只回复：✅ 回答正确！或 ❌ 错误，答案是xxx"}]
+            messages=[{"role": "user", "content": f"正确答案'{quiz_answers[session_key]}'，用户答'{user_answer}'，只回复：✅ 回答正确！或 ❌ 错误，答案是xxx"}]
         )
         result = response.choices[0].message.content
-        user_modes.pop(user_id, None)
-        quiz_answers.pop(user_id, None)
+        user_modes.pop(session_key, None)
+        quiz_answers.pop(session_key, None)
         await answer_cmd.finish(Message(f"{result}\n\n发送 /问答 继续"))
     except FinishedException:
         pass
@@ -187,8 +206,9 @@ exit_quiz_cmd = on_command("退出问答", priority=3, block=True)
 
 @exit_quiz_cmd.handle()
 async def handle_exit_quiz(event: MessageEvent):
-    user_modes.pop(event.user_id, None)
-    quiz_answers.pop(event.user_id, None)
+    session_key = conversation_key(event)
+    user_modes.pop(session_key, None)
+    quiz_answers.pop(session_key, None)
     await exit_quiz_cmd.finish("✅ 已退出问答")
 
 # ========== 塔罗牌占卜 ==========
@@ -287,7 +307,7 @@ def is_plugin_command(message: str) -> bool:
     )
 
 async def active_rule(event: MessageEvent) -> bool:
-    if event.user_id not in active_users:
+    if conversation_key(event) not in active_users:
         return False
     if await greet_rule(event) or await bye_rule(event):
         return False
@@ -375,6 +395,30 @@ def get_image_url(segment: MessageSegment) -> str | None:
     return url or None
 
 
+def get_image_signature(segment: MessageSegment) -> str | None:
+    if segment.type != "image":
+        return None
+
+    for key in ("file_unique", "file", "md5", "url"):
+        value = str(segment.data.get(key, "")).strip()
+        if value:
+            return f"{key}:{value}"
+
+    summary = normalize_segment_summary(segment.data.get("summary", ""))
+    return f"summary:{summary}" if summary else None
+
+
+def is_recent_image(cache_key: tuple[str, int | None], signature: str) -> bool:
+    signatures = recent_image_signatures.setdefault(cache_key, [])
+    if signature in signatures:
+        return True
+
+    signatures.append(signature)
+    if len(signatures) > MAX_RECENT_IMAGE_SIGNATURES:
+        del signatures[: len(signatures) - MAX_RECENT_IMAGE_SIGNATURES]
+    return False
+
+
 def format_user_message(message: Message) -> str:
     """把 OneBot 消息段转成模型可理解的聊天文本。"""
     parts: list[str] = []
@@ -390,7 +434,10 @@ def format_user_message(message: Message) -> str:
     return " ".join(part for part in parts if part).strip()
 
 
-def build_user_message_content(message: Message) -> str | list[dict[str, Any]]:
+def build_user_message_content(
+    message: Message,
+    cache_key: tuple[str, int | None] | None = None,
+) -> str | list[dict[str, Any]]:
     """构造 OpenAI 兼容的多模态用户消息内容。"""
     content: list[dict[str, Any]] = []
     text_parts: list[str] = []
@@ -411,6 +458,16 @@ def build_user_message_content(message: Message) -> str | list[dict[str, Any]]:
             continue
 
         image_url = get_image_url(segment)
+        image_signature = get_image_signature(segment)
+        if (
+            image_url
+            and image_signature
+            and cache_key is not None
+            and is_recent_image(cache_key, image_signature)
+        ):
+            text_parts.append(f"{describe_non_text_segment(segment)}（重复图片，已跳过识别）")
+            continue
+
         if image_url:
             flush_text_parts()
             content.append(
@@ -441,20 +498,24 @@ async def process_chat(matcher, bot: Bot, event: MessageEvent):
         return
 
     user_id = event.user_id
+    session_key = conversation_key(event)
     plain_user_msg = event.get_plaintext().strip()
     event_message = event.get_message()
     user_msg = format_user_message(event_message)
-    current_user_content = build_user_message_content(event_message)
+    current_user_content = build_user_message_content(
+        event_message,
+        image_cache_key(event),
+    )
 
     if not user_msg or not current_user_content:
         return
 
     # 处理角色选择
-    if user_modes.get(user_id) == "selecting_role":
+    if user_modes.get(session_key) == "selecting_role":
         if plain_user_msg in ROLES:
             role_name, role_prompt = ROLES[plain_user_msg]
-            user_roles[user_id] = role_prompt
-            user_modes[user_id] = "roleplay"
+            user_roles[session_key] = role_prompt
+            user_modes[session_key] = "roleplay"
             await matcher.finish(f"🎭 已切换为【{role_name}】，发送 /退出角色 可退出")
         else:
             await matcher.finish("请回复 1-4 选择角色")
@@ -463,8 +524,8 @@ async def process_chat(matcher, bot: Bot, event: MessageEvent):
     try:
         # 构建系统提示
         system = SYSTEM_PROMPT
-        if user_modes.get(user_id) == "roleplay" and user_id in user_roles:
-            system = user_roles[user_id]
+        if user_modes.get(session_key) == "roleplay" and session_key in user_roles:
+            system = user_roles[session_key]
         system += await get_user_title_prompt(user_id, bot, event)
         mentioned_title_records = await get_mentioned_title_records(
             user_msg, bot, event
@@ -474,13 +535,13 @@ async def process_chat(matcher, bot: Bot, event: MessageEvent):
         )
 
         # 初始化历史
-        if user_id not in user_history:
-            user_history[user_id] = []
+        if session_key not in user_history:
+            user_history[session_key] = []
 
         # 当前轮可携带图片；历史只保留文字摘要，避免旧图片反复进入上下文。
         messages = (
             [{"role": "system", "content": system}]
-            + user_history[user_id]
+            + user_history[session_key]
             + [{"role": "user", "content": current_user_content}]
         )
 
@@ -490,14 +551,14 @@ async def process_chat(matcher, bot: Bot, event: MessageEvent):
         reply = response.choices[0].message.content
 
         # 保存用户消息摘要到历史
-        user_history[user_id].append({"role": "user", "content": user_msg})
+        user_history[session_key].append({"role": "user", "content": user_msg})
 
         # 保存助手回复到历史
-        user_history[user_id].append({"role": "assistant", "content": reply})
+        user_history[session_key].append({"role": "assistant", "content": reply})
 
         # 限制历史长度
-        if len(user_history[user_id]) > MAX_HISTORY * 2:
-            user_history[user_id] = user_history[user_id][-MAX_HISTORY * 2:]
+        if len(user_history[session_key]) > MAX_HISTORY * 2:
+            user_history[session_key] = user_history[session_key][-MAX_HISTORY * 2:]
 
         logger.info(f"回复: {reply[:80]}...")
         await matcher.finish(
@@ -511,7 +572,7 @@ async def process_chat(matcher, bot: Bot, event: MessageEvent):
 
 @greet_chat.handle()
 async def handle_greet(bot: Bot, event: MessageEvent):
-    active_users.add(event.user_id)
+    active_users.add(conversation_key(event))
     await process_chat(greet_chat, bot, event)
 
 @active_chat.handle()
@@ -520,13 +581,14 @@ async def handle_active(bot: Bot, event: MessageEvent):
 
 @bye_chat.handle()
 async def handle_bye(event: MessageEvent):
-    active_users.discard(event.user_id)
-    user_modes.pop(event.user_id, None)
-    user_roles.pop(event.user_id, None)
-    user_history.pop(event.user_id, None)
+    session_key = conversation_key(event)
+    active_users.discard(session_key)
+    user_modes.pop(session_key, None)
+    user_roles.pop(session_key, None)
+    user_history.pop(session_key, None)
     await bye_chat.finish("👋 再见！有需要随时说'你好'找我")
 
 @chat_at.handle()
 async def handle_chat_at(bot: Bot, event: MessageEvent):
-    active_users.add(event.user_id)
+    active_users.add(conversation_key(event))
     await process_chat(chat_at, bot, event)

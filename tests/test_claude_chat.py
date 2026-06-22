@@ -10,7 +10,9 @@ from nonebot.adapters.onebot.v11 import Message, MessageSegment  # noqa: E402
 
 from plugins.claude_chat import build_user_message_content  # noqa: E402
 from plugins.claude_chat import build_chat_reply_message  # noqa: E402
+from plugins.claude_chat import conversation_key  # noqa: E402
 from plugins.claude_chat import format_user_message  # noqa: E402
+from plugins.claude_chat import recent_image_signatures  # noqa: E402
 from plugins.user_titles import UserTitleRecord  # noqa: E402
 
 
@@ -38,6 +40,9 @@ class ClaudeChatReplyTest(unittest.TestCase):
 
 
 class ClaudeChatMessageFormatTest(unittest.TestCase):
+    def tearDown(self):
+        recent_image_signatures.clear()
+
     def test_keeps_plain_text_compact(self):
         message = Message("  人机为啥不说话？\n")
 
@@ -102,6 +107,55 @@ class ClaudeChatMessageFormatTest(unittest.TestCase):
             build_user_message_content(message),
             "这个表情 [图片：动画表情]",
         )
+
+    def test_repeated_image_skips_vision_input(self):
+        cache_key = ("group", 10000)
+        message = Message(
+            [
+                MessageSegment.text("又来了"),
+                MessageSegment(
+                    "image",
+                    {
+                        "summary": "[动画表情]",
+                        "file": "same-image.jpg",
+                        "url": "https://example.com/image.jpg",
+                    },
+                ),
+            ]
+        )
+
+        first_content = build_user_message_content(message, cache_key)
+        second_content = build_user_message_content(message, cache_key)
+
+        self.assertIsInstance(first_content, list)
+        self.assertIn(
+            {
+                "type": "image_url",
+                "image_url": {"url": "https://example.com/image.jpg"},
+            },
+            first_content,
+        )
+        self.assertEqual(
+            second_content,
+            "又来了 [图片：动画表情]（重复图片，已跳过识别）",
+        )
+
+
+class ClaudeChatSessionKeyTest(unittest.TestCase):
+    def test_group_sessions_are_isolated_by_group_id(self):
+        first_group_event = SimpleNamespace(user_id=12345, group_id=10000)
+        second_group_event = SimpleNamespace(user_id=12345, group_id=20000)
+
+        self.assertNotEqual(
+            conversation_key(first_group_event),
+            conversation_key(second_group_event),
+        )
+
+    def test_private_session_is_separate_from_group_session(self):
+        private_event = SimpleNamespace(user_id=12345)
+        group_event = SimpleNamespace(user_id=12345, group_id=10000)
+
+        self.assertNotEqual(conversation_key(private_event), conversation_key(group_event))
 
 
 if __name__ == "__main__":
