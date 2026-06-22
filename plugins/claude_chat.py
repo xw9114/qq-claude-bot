@@ -55,13 +55,24 @@ IMAGE_CACHE_TTL_SECONDS = 3 * 60 * 60
 RUNTIME_CLEANUP_INTERVAL_SECONDS = 30 * 60
 
 # 系统提示词（QQ群聊风格）
-SYSTEM_PROMPT = """你正在 QQ 群里自然聊天，不是客服、说明书或搜索引擎。
-回复要像真实群友：先判断对方是在提问、吐槽、接梗、发图/表情，还是认真求助。
-普通闲聊控制在 1-3 句，口语、松弛，可以轻度吐槽和接梗，但不要硬玩梗、尬夸或说教。
-认真问题直接给可执行答案；信息不足时先指出关键缺口，再给一个最可能的判断。
-当用户发送图片时，你可以直接观察图片内容；如果图片无法访问，再根据图片说明和上下文说明限制。
-历史消息只属于当前会话里的当前发言用户；不要把某人的“我……”归因给其他人。
-避免模板化开场、频繁感叹号和过量 emoji。"""
+SYSTEM_PROMPT = """你就是 QQ 群里的一个普通群友，不是客服，也不要表现得像 AI 助手。
+先接住对方当前这句话，再决定是否展开。
+
+闲聊规则：
+- 默认只回 1 句，通常 10-50 字；对方明显在认真提问时才适当展开。
+- 用自然口语，顺着对方的用词和情绪说。可以轻吐槽、接梗、自嘲，但别强行搞笑。
+- 不复述问题，不做“我理解你的感受”式套路共情，不总结，不主动列清单，不上价值。
+- 禁用“如果你愿意”“如果需要”“希望能帮到你”“有问题随时问我”这类助手尾巴。
+- 少用“可能、建议、首先、其次、总之”，少用感叹号、emoji 和 Markdown。
+- 对方只是在分享近况时，像熟人一样回应；只有明确求助时才给具体办法。
+
+认真问题规则：
+- 直接回答核心问题，信息不足就指出缺口；不要为了显得专业而堆术语。
+- 不知道就直说不知道，不编造事实或图片细节。
+
+上下文规则：
+- 图片能访问时直接看图回应；无法访问时再说明限制，不要假装看见。
+- 历史只属于当前会话的当前发言用户；不要把某人的“我……”归因给其他人。"""
 
 # 角色预设
 ROLES = {
@@ -86,6 +97,16 @@ def conversation_key(event: MessageEvent) -> tuple[str, int, int | None]:
 def image_cache_key(event: MessageEvent) -> tuple[str, int | None]:
     group_id = getattr(event, "group_id", None)
     return ("group", group_id) if group_id is not None else ("private", event.user_id)
+
+
+def build_style_prompt(session_key) -> str:
+    role_prompt = user_roles.get(session_key)
+    if not role_prompt or user_modes.get(session_key) != "roleplay":
+        return SYSTEM_PROMPT
+    return (
+        f"{SYSTEM_PROMPT}\n\n当前角色设定：{role_prompt}\n"
+        "角色设定只影响口吻，不改变上面的聊天节奏和上下文规则。"
+    )
 
 
 def touch_session(session_key, now: float | None = None) -> None:
@@ -655,9 +676,7 @@ async def process_chat(matcher, bot: Bot, event: MessageEvent):
 
     try:
         # 构建系统提示
-        system = SYSTEM_PROMPT
-        if user_modes.get(session_key) == "roleplay" and session_key in user_roles:
-            system = user_roles[session_key]
+        system = build_style_prompt(session_key)
         long_term_memory = await memory_store.get_summary(session_key)
         system += build_long_term_memory_prompt(long_term_memory)
         system += await get_user_title_prompt(user_id, bot, event)

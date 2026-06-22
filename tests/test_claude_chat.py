@@ -8,8 +8,10 @@ nonebot.init()
 
 from nonebot.adapters.onebot.v11 import Message, MessageSegment  # noqa: E402
 
+from plugins.claude_chat import SYSTEM_PROMPT  # noqa: E402
 from plugins.claude_chat import build_user_message_content  # noqa: E402
 from plugins.claude_chat import build_chat_reply_message  # noqa: E402
+from plugins.claude_chat import build_style_prompt  # noqa: E402
 from plugins.claude_chat import cleanup_runtime_state  # noqa: E402
 from plugins.claude_chat import active_users  # noqa: E402
 from plugins.claude_chat import clear_runtime_session_state  # noqa: E402
@@ -165,6 +167,29 @@ class ClaudeChatSessionKeyTest(unittest.TestCase):
         group_event = SimpleNamespace(user_id=12345, group_id=10000)
 
         self.assertNotEqual(conversation_key(private_event), conversation_key(group_event))
+
+
+class ClaudeChatPromptTest(unittest.TestCase):
+    def tearDown(self):
+        user_modes.clear()
+        user_roles.clear()
+
+    def test_prompt_rejects_assistant_style_tails(self):
+        self.assertIn("普通群友", SYSTEM_PROMPT)
+        self.assertIn("默认只回 1 句", SYSTEM_PROMPT)
+        self.assertIn("如果你愿意", SYSTEM_PROMPT)
+        self.assertIn("不复述问题", SYSTEM_PROMPT)
+
+    def test_roleplay_keeps_base_chat_style(self):
+        session_key = ("group", 12345, 10000)
+        user_modes[session_key] = "roleplay"
+        user_roles[session_key] = "说话像古代谋士"
+
+        prompt = build_style_prompt(session_key)
+
+        self.assertIn(SYSTEM_PROMPT, prompt)
+        self.assertIn("当前角色设定：说话像古代谋士", prompt)
+        self.assertIn("只影响口吻", prompt)
 
 
 class ClaudeChatRuntimeCleanupTest(unittest.TestCase):
