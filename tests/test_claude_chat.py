@@ -6,7 +6,10 @@ import nonebot
 
 nonebot.init()
 
+from nonebot.adapters.onebot.v11 import Message, MessageSegment  # noqa: E402
+
 from plugins.claude_chat import build_chat_reply_message  # noqa: E402
+from plugins.claude_chat import format_user_message  # noqa: E402
 from plugins.user_titles import UserTitleRecord  # noqa: E402
 
 
@@ -31,6 +34,34 @@ class ClaudeChatReplyTest(unittest.TestCase):
         self.assertEqual([(segment.type, segment.data) for segment in message], [
             ("text", {"text": "普通回复"})
         ])
+
+
+class ClaudeChatMessageFormatTest(unittest.TestCase):
+    def test_keeps_plain_text_compact(self):
+        message = Message("  人机为啥不说话？\n")
+
+        self.assertEqual(format_user_message(message), "人机为啥不说话？")
+
+    def test_describes_image_face_and_mentions(self):
+        message = Message(
+            [
+                MessageSegment.text("你看"),
+                MessageSegment(
+                    "image",
+                    {
+                        "summary": "[动画表情]",
+                        "file": "3FFDD985.jpg",
+                    },
+                ),
+                MessageSegment.face(14),
+                MessageSegment.at(123456),
+            ]
+        )
+
+        self.assertEqual(
+            format_user_message(message),
+            "你看 [图片：动画表情] [QQ表情:14] @123456",
+        )
 
 
 if __name__ == "__main__":

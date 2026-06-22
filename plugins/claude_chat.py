@@ -1,3 +1,5 @@
+from typing import Any
+
 from nonebot import on_message, on_command, get_driver
 import random
 from nonebot.adapters.onebot.v11 import Bot, MessageEvent, Message, MessageSegment
@@ -35,8 +37,13 @@ user_history = {}    # 用户对话历史
 
 MAX_HISTORY = 10     # 最多保留10轮对话
 
-# 系统提示词（简洁风格）
-SYSTEM_PROMPT = "你是一个简洁的助手，回复尽量控制在100字以内，直接给出答案，不要废话。"
+# 系统提示词（QQ群聊风格）
+SYSTEM_PROMPT = """你正在 QQ 群里自然聊天，不是客服、说明书或搜索引擎。
+回复要像真实群友：先判断对方是在提问、吐槽、接梗、发图/表情，还是认真求助。
+普通闲聊控制在 1-3 句，口语、松弛，可以轻度吐槽和接梗，但不要硬玩梗、尬夸或说教。
+认真问题直接给可执行答案；信息不足时先指出关键缺口，再给一个最可能的判断。
+你看不到图片真实内容，只能根据消息里的图片说明、表情文字或上下文回应；不要假装看见细节。
+避免模板化开场、频繁感叹号和过量 emoji。"""
 
 # 角色预设
 ROLES = {
@@ -308,21 +315,89 @@ def build_chat_reply_message(
     return MessageSegment.at(target_id) + " " + reply_message
 
 
+def normalize_segment_text(text: Any) -> str:
+    return str(text).strip()
+
+
+def compact_segment_text(text: Any) -> str:
+    """压缩 CQ 元数据空白，避免无意义换行污染模型上下文。"""
+    return " ".join(str(text).split())
+
+
+def normalize_segment_summary(summary: Any) -> str:
+    text = compact_segment_text(summary)
+    if len(text) >= 2 and text.startswith("[") and text.endswith("]"):
+        return text[1:-1].strip()
+    return text
+
+
+def describe_non_text_segment(segment: MessageSegment) -> str:
+    data = segment.data
+    segment_type = segment.type
+
+    if segment_type == "at":
+        qq = str(data.get("qq", "")).strip()
+        return "@全体成员" if qq == "all" else f"@{qq}" if qq else "[@某人]"
+
+    if segment_type == "face":
+        face_id = str(data.get("id", "")).strip()
+        return f"[QQ表情:{face_id}]" if face_id else "[QQ表情]"
+
+    if segment_type == "image":
+        summary = normalize_segment_summary(data.get("summary", ""))
+        return f"[图片：{summary}]" if summary else "[图片]"
+
+    if segment_type == "record":
+        return "[语音消息]"
+
+    if segment_type == "video":
+        return "[视频消息]"
+
+    if segment_type == "file":
+        name = compact_segment_text(data.get("name", ""))
+        return f"[文件：{name}]" if name else "[文件]"
+
+    if segment_type == "reply":
+        message_id = str(data.get("id", "")).strip()
+        return f"[回复消息:{message_id}]" if message_id else "[回复消息]"
+
+    if segment_type in {"json", "xml"}:
+        return "[卡片消息]"
+
+    return f"[{segment_type}消息]"
+
+
+def format_user_message(message: Message) -> str:
+    """把 OneBot 消息段转成模型可理解的聊天文本。"""
+    parts: list[str] = []
+    for segment in message:
+        if segment.type == "text":
+            text = normalize_segment_text(segment.data.get("text", ""))
+            if text:
+                parts.append(text)
+            continue
+
+        parts.append(describe_non_text_segment(segment))
+
+    return " ".join(part for part in parts if part).strip()
+
+
 async def process_chat(matcher, bot: Bot, event: MessageEvent):
     if not client:
         await matcher.finish("❌ API 未配置")
         return
 
     user_id = event.user_id
-    user_msg = event.get_plaintext().strip()
+    plain_user_msg = event.get_plaintext().strip()
+    user_msg = format_user_message(event.get_message())
 
     if not user_msg:
         return
 
     # 处理角色选择
     if user_modes.get(user_id) == "selecting_role":
-        if user_msg in ROLES:
-            role_name, role_prompt = ROLES[user_msg]
+        if plain_user_msg in ROLES:
+            role_name, role_prompt = ROLES[plain_user_msg]
             user_roles[user_id] = role_prompt
             user_modes[user_id] = "roleplay"
             await matcher.finish(f"🎭 已切换为【{role_name}】，发送 /退出角色 可退出")
