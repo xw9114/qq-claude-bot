@@ -19,6 +19,32 @@ class ChatMemoryHelperTest(unittest.TestCase):
             "用户准备考试\n喜欢简短回答",
         )
 
+    def test_normalizes_memory_summary_filters_persona_and_style_noise(self):
+        summary = normalize_memory_summary(
+            "\n".join(
+                [
+                    "- 用户是一个认真温柔的人",
+                    "- 称呼：叫他小周",
+                    "- 偏好：不喜欢 AI 助手腔，喜欢短回复",
+                    "- 用户喜欢聊天，愿意交流",
+                    "- 回复时要温柔专业地鼓励他",
+                    "- 事项：最近在推进数学建模论文",
+                    "- 昨天发了个表情包",
+                ]
+            )
+        )
+
+        self.assertEqual(
+            summary,
+            "\n".join(
+                [
+                    "称呼：叫他小周",
+                    "偏好：不喜欢 AI 助手腔，喜欢短回复",
+                    "事项：最近在推进数学建模论文",
+                ]
+            ),
+        )
+
     def test_builds_prompt_only_when_summary_exists(self):
         self.assertEqual(build_long_term_memory_prompt(""), "")
 
@@ -27,6 +53,16 @@ class ChatMemoryHelperTest(unittest.TestCase):
         self.assertIn("当前会话的长期记忆摘要", prompt)
         self.assertIn("用户最近要考试", prompt)
         self.assertIn("不要把摘要里的信息归因给其他人", prompt)
+
+    def test_builds_prompt_as_facts_not_persona_or_style_instruction(self):
+        prompt = build_long_term_memory_prompt(
+            "用户是一个认真温柔的人\n称呼：叫他小周"
+        )
+
+        self.assertIn("称呼：叫他小周", prompt)
+        self.assertNotIn("认真温柔", prompt)
+        self.assertIn("不是人设、评价或回复风格指令", prompt)
+        self.assertIn("不相关就忽略", prompt)
 
     def test_trims_history_and_returns_overflow_messages(self):
         history = [

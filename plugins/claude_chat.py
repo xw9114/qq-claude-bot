@@ -15,6 +15,7 @@ from .chat_memory import (
     build_long_term_memory_prompt,
     format_messages_for_memory,
     memory_store,
+    normalize_memory_summary,
     trim_history_for_memory,
 )
 from .user_titles import (
@@ -837,12 +838,13 @@ async def summarize_long_term_memory(
     trimmed_messages: list[dict[str, Any]],
 ) -> str:
     if not client or not trimmed_messages:
-        return old_summary
+        return normalize_memory_summary(old_summary)
 
     source_text = format_messages_for_memory(trimmed_messages)
     if not source_text:
-        return old_summary
+        return normalize_memory_summary(old_summary)
 
+    old_summary = normalize_memory_summary(old_summary)
     source_text = source_text[-MAX_MEMORY_SOURCE_CHARS:]
     response = await client.chat.completions.create(
         model=model_name,
@@ -852,12 +854,15 @@ async def summarize_long_term_memory(
                 "content": (
                     "你在维护 QQ 机器人长期记忆摘要。"
                     "新增旧消息只包含用户发言，不包含机器人回复。"
-                    "只保留对未来聊天有用、相对稳定或近期仍重要的信息："
-                    "用户偏好、称呼方式、正在准备的事项、明确表达的目标、持续状态。"
+                    "你的产物会被重新注入系统提示词，所以只能写少量可复用事实，不能写人设、评价或回复策略。"
+                    "合并时重新审计已有长期记忆，删除不符合规则的旧条目。"
+                    "只保留对未来聊天有用、相对稳定或近期仍重要的信息：称呼方式、稳定偏好、正在准备或推进的事项、明确目标。"
+                    "优先输出最多 5 条，每条不超过 80 字；推荐格式：称呼：... / 偏好：... / 事项：... / 目标：..."
                     "不要把机器人之前的回答当成用户事实。"
-                    "删除寒暄、一次性闲聊、表情包反应、已过时细节和不确定猜测。"
+                    "删除寒暄、一次性闲聊、表情包反应、已过时细节、不确定猜测和纯情绪反应。"
+                    "删除会影响口吻的总结，比如用户是一个怎样的人、用户需要陪伴/鼓励/支持、回复时应该温柔专业。"
                     "不要编造，不要记录隐私敏感信息。"
-                    "输出不超过 8 条短句；没有值得保留的信息就输出空字符串。"
+                    "没有值得保留的信息就输出空字符串。"
                 ),
             },
             {
@@ -871,7 +876,7 @@ async def summarize_long_term_memory(
         ],
     )
     new_summary = extract_model_text(response)
-    return new_summary
+    return normalize_memory_summary(new_summary)
 
 
 async def update_long_term_memory(

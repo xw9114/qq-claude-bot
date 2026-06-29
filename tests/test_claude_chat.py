@@ -265,6 +265,60 @@ class ClaudeChatPromptTest(unittest.TestCase):
         self.assertIn("只影响口吻", prompt)
 
 
+class ClaudeChatMemorySummaryTest(unittest.TestCase):
+    def test_summarize_memory_reaudits_old_summary_and_filters_model_output(self):
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            async def create(self, model, messages):
+                self.calls.append({"model": model, "messages": messages})
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content=(
+                                    "用户是一个认真温柔的人\n"
+                                    "偏好：喜欢短回复\n"
+                                    "回复时要温柔专业地鼓励他"
+                                )
+                            )
+                        )
+                    ]
+                )
+
+        async def run_test():
+            completions = FakeCompletions()
+            fake_client = SimpleNamespace(
+                chat=SimpleNamespace(completions=completions)
+            )
+            original_client = claude_chat.client
+            claude_chat.client = fake_client
+            try:
+                summary = await claude_chat.summarize_long_term_memory(
+                    "用户是一个认真温柔的人\n事项：最近在准备面试",
+                    [
+                        {"role": "user", "content": "我最近在改简历"},
+                        {"role": "assistant", "content": "用户需要温柔鼓励"},
+                    ],
+                )
+            finally:
+                claude_chat.client = original_client
+
+            self.assertEqual(summary, "偏好：喜欢短回复")
+            self.assertEqual(len(completions.calls), 1)
+
+            messages = completions.calls[0]["messages"]
+            self.assertIn("不能写人设、评价或回复策略", messages[0]["content"])
+            self.assertIn("最多 5 条", messages[0]["content"])
+            self.assertIn("事项：最近在准备面试", messages[1]["content"])
+            self.assertNotIn("认真温柔", messages[1]["content"])
+            self.assertIn("用户: 我最近在改简历", messages[1]["content"])
+            self.assertNotIn("用户需要温柔鼓励", messages[1]["content"])
+
+        asyncio.run(run_test())
+
+
 class ClaudeChatStateTransitionTest(unittest.TestCase):
     def tearDown(self):
         active_users.clear()
