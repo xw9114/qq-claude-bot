@@ -1,4 +1,5 @@
 import asyncio
+import re
 import time
 from typing import Any
 
@@ -514,17 +515,38 @@ async def handle_joke(event: MessageEvent):
         await joke_cmd.finish("❌ 失败，请重试")
 
 # ========== 普通聊天 ==========
+CHAT_TRIGGER_EDGE_CHARS = " \t\r\n,，.。!！?？~～"
+GREET_MESSAGE_PHRASES = {"你好"}
+BYE_MESSAGE_PHRASES = {"再见", "拜拜"}
+GREET_WORD_PATTERN = re.compile(r"(?<!\w)(?:hello|hi)(?!\w)", re.IGNORECASE)
+BYE_WORD_PATTERN = re.compile(r"(?<!\w)(?:goodbye|bye)(?!\w)", re.IGNORECASE)
+
+
+def is_whole_trigger_message(message: str, phrases: set[str]) -> bool:
+    return message.strip(CHAT_TRIGGER_EDGE_CHARS) in phrases
+
+
+def has_independent_trigger_word(message: str, pattern: re.Pattern[str]) -> bool:
+    return pattern.search(message) is not None
+
+
 # 结束对话词（优先检查）
 async def bye_rule(event: MessageEvent) -> bool:
     msg = event.get_plaintext().strip()
-    return any(kw in msg for kw in ["再见", "拜拜", "bye", "goodbye"])
+    return is_whole_trigger_message(
+        msg,
+        BYE_MESSAGE_PHRASES,
+    ) or has_independent_trigger_word(msg, BYE_WORD_PATTERN)
 
 # 触发词开启对话（且不是结束词）
 async def greet_rule(event: MessageEvent) -> bool:
     msg = event.get_plaintext().strip()
     if await bye_rule(event):
         return False
-    return any(kw in msg for kw in ["你好", "hello", "hi"])
+    return is_whole_trigger_message(
+        msg,
+        GREET_MESSAGE_PHRASES,
+    ) or has_independent_trigger_word(msg, GREET_WORD_PATTERN)
 
 # 聊天模式不应接管的插件指令。部分插件允许省略命令前缀，
 # 因此这里同时保留帮助中公开的裸指令入口。
@@ -899,7 +921,7 @@ async def update_long_term_memory_safely(
             if generation != memory_update_generations.get(session_key, 0):
                 return
 
-            current_summary = await memory_store.get_summary(session_key)
+            current_summary = await memory_store.get_injectable_summary(session_key)
             new_summary = await summarize_long_term_memory(
                 current_summary,
                 trimmed_messages,
@@ -952,7 +974,7 @@ async def process_chat_locked(matcher, bot: Bot, event: MessageEvent, session_ke
     try:
         # 构建系统提示
         system = build_style_prompt(session_key)
-        long_term_memory = await memory_store.get_summary(session_key)
+        long_term_memory = await memory_store.get_injectable_summary(session_key)
         system += build_long_term_memory_prompt(long_term_memory)
         system += await get_user_title_prompt(user_id, bot, event)
         mentioned_title_records = await get_mentioned_title_records(
@@ -1017,7 +1039,7 @@ async def handle_bye(event: MessageEvent):
     session_key = conversation_key(event)
     async with get_session_lock(session_key):
         clear_runtime_session_state(session_key)
-    await bye_chat.finish("👋 再见！有需要随时说'你好'找我")
+    await bye_chat.finish("👋 再见，回头聊。")
 
 @chat_at.handle()
 async def handle_chat_at(bot: Bot, event: MessageEvent):

@@ -1,9 +1,13 @@
 import asyncio
+import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from plugins.chat_memory import (
+    LONG_TERM_MEMORY_INJECTION_TTL,
     LongTermMemoryStore,
     build_long_term_memory_prompt,
     format_messages_for_memory,
@@ -64,6 +68,25 @@ class ChatMemoryHelperTest(unittest.TestCase):
         self.assertIn("不是人设、评价或回复风格指令", prompt)
         self.assertIn("不相关就忽略", prompt)
 
+    def test_builds_prompt_only_for_recent_summary_when_timestamp_is_given(self):
+        now = datetime(2026, 6, 30, tzinfo=timezone.utc)
+        fresh_updated_at = now - LONG_TERM_MEMORY_INJECTION_TTL + timedelta(seconds=1)
+        stale_updated_at = now - LONG_TERM_MEMORY_INJECTION_TTL - timedelta(seconds=1)
+
+        fresh_prompt = build_long_term_memory_prompt(
+            "事项：最近在准备考试",
+            updated_at=fresh_updated_at,
+            now=now,
+        )
+        stale_prompt = build_long_term_memory_prompt(
+            "事项：很久以前在准备考试",
+            updated_at=stale_updated_at,
+            now=now,
+        )
+
+        self.assertIn("事项：最近在准备考试", fresh_prompt)
+        self.assertEqual(stale_prompt, "")
+
     def test_trims_history_and_returns_overflow_messages(self):
         history = [
             {"role": "user", "content": f"用户消息 {index}"}
@@ -119,6 +142,42 @@ class LongTermMemoryStoreTest(unittest.TestCase):
                 self.assertTrue(await store.delete_summary(group_session))
                 self.assertEqual(await store.get_summary(group_session), "")
                 self.assertFalse(await store.delete_summary(group_session))
+
+        asyncio.run(run_test())
+
+    def test_get_injectable_summary_respects_updated_at_ttl(self):
+        async def run_test():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                database_path = Path(temp_dir) / "memory.db"
+                store = LongTermMemoryStore(database_path, use_wal=False)
+                session_key = ("group", 12345, 10000)
+                now = datetime(2026, 6, 30, tzinfo=timezone.utc)
+
+                await store.upsert_summary(session_key, "事项：最近在准备考试")
+
+                self.assertEqual(
+                    await store.get_injectable_summary(session_key, now=now),
+                    "事项：最近在准备考试",
+                )
+
+                stale_updated_at = (
+                    now - LONG_TERM_MEMORY_INJECTION_TTL - timedelta(seconds=1)
+                )
+                with closing(sqlite3.connect(database_path)) as connection:
+                    with connection:
+                        connection.execute(
+                            "UPDATE chat_memory SET updated_at = ?",
+                            (stale_updated_at.isoformat(),),
+                        )
+
+                self.assertEqual(
+                    await store.get_summary(session_key),
+                    "事项：最近在准备考试",
+                )
+                self.assertEqual(
+                    await store.get_injectable_summary(session_key, now=now),
+                    "",
+                )
 
         asyncio.run(run_test())
 

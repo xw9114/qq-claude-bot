@@ -1,5 +1,10 @@
 import asyncio
+import sqlite3
+import tempfile
 import unittest
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from types import SimpleNamespace
 
 import nonebot
@@ -10,8 +15,13 @@ nonebot.init()
 from nonebot.adapters.onebot.v11 import Message, MessageSegment  # noqa: E402
 
 import plugins.claude_chat as claude_chat  # noqa: E402
+from plugins.chat_memory import (  # noqa: E402
+    LONG_TERM_MEMORY_INJECTION_TTL,
+    LongTermMemoryStore,
+)
 from plugins.claude_chat import SYSTEM_PROMPT  # noqa: E402
 from plugins.claude_chat import active_rule  # noqa: E402
+from plugins.claude_chat import bye_rule  # noqa: E402
 from plugins.claude_chat import build_user_message_content  # noqa: E402
 from plugins.claude_chat import build_chat_reply_message  # noqa: E402
 from plugins.claude_chat import build_style_prompt  # noqa: E402
@@ -23,6 +33,7 @@ from plugins.claude_chat import conversation_key  # noqa: E402
 from plugins.claude_chat import exit_roleplay_state  # noqa: E402
 from plugins.claude_chat import extract_model_text  # noqa: E402
 from plugins.claude_chat import format_user_message  # noqa: E402
+from plugins.claude_chat import greet_rule  # noqa: E402
 from plugins.claude_chat import get_session_lock  # noqa: E402
 from plugins.claude_chat import image_cache_last_seen  # noqa: E402
 from plugins.claude_chat import memory_update_generations  # noqa: E402
@@ -242,6 +253,43 @@ class ClaudeChatSessionKeyTest(unittest.TestCase):
         self.assertNotEqual(conversation_key(private_event), conversation_key(group_event))
 
 
+class ClaudeChatTriggerRuleTest(unittest.TestCase):
+    @staticmethod
+    def event(text):
+        return SimpleNamespace(get_plaintext=lambda: text)
+
+    def test_greet_rule_requires_whole_chinese_message(self):
+        self.assertTrue(asyncio.run(greet_rule(self.event("你好"))))
+        self.assertTrue(asyncio.run(greet_rule(self.event("  你好！ "))))
+        self.assertFalse(asyncio.run(greet_rule(self.event("你好像还没睡"))))
+        self.assertFalse(asyncio.run(greet_rule(self.event("我刚刚说了你好"))))
+
+    def test_greet_rule_matches_independent_english_words(self):
+        self.assertTrue(asyncio.run(greet_rule(self.event("hi"))))
+        self.assertTrue(asyncio.run(greet_rule(self.event("Hi!"))))
+        self.assertTrue(asyncio.run(greet_rule(self.event("oh hi there"))))
+        self.assertFalse(asyncio.run(greet_rule(self.event("this should not open chat"))))
+        self.assertFalse(asyncio.run(greet_rule(self.event("highlight this part"))))
+
+    def test_bye_rule_requires_whole_chinese_message(self):
+        self.assertTrue(asyncio.run(bye_rule(self.event("再见"))))
+        self.assertTrue(asyncio.run(bye_rule(self.event("拜拜～"))))
+        self.assertFalse(asyncio.run(bye_rule(self.event("明天再见面"))))
+        self.assertFalse(asyncio.run(bye_rule(self.event("先别拜拜这个流程"))))
+
+    def test_bye_rule_matches_independent_english_words(self):
+        self.assertTrue(asyncio.run(bye_rule(self.event("bye"))))
+        self.assertTrue(asyncio.run(bye_rule(self.event("ok, bye!"))))
+        self.assertFalse(asyncio.run(bye_rule(self.event("byebug can pause code"))))
+        self.assertFalse(asyncio.run(bye_rule(self.event("goodbyes are awkward"))))
+
+    def test_greet_rule_lets_bye_rule_win(self):
+        event = self.event("bye hi")
+
+        self.assertTrue(asyncio.run(bye_rule(event)))
+        self.assertFalse(asyncio.run(greet_rule(event)))
+
+
 class ClaudeChatPromptTest(unittest.TestCase):
     def tearDown(self):
         user_modes.clear()
@@ -315,6 +363,113 @@ class ClaudeChatMemorySummaryTest(unittest.TestCase):
             self.assertNotIn("认真温柔", messages[1]["content"])
             self.assertIn("用户: 我最近在改简历", messages[1]["content"])
             self.assertNotIn("用户需要温柔鼓励", messages[1]["content"])
+
+        asyncio.run(run_test())
+
+
+class ClaudeChatMemoryInjectionTest(unittest.TestCase):
+    def tearDown(self):
+        user_history.clear()
+        recent_image_signatures.clear()
+        image_cache_last_seen.clear()
+        session_last_seen.clear()
+
+    def test_stale_long_term_summary_is_not_injected_into_chat_prompt(self):
+        class FakeCompletions:
+            def __init__(self):
+                self.calls = []
+
+            async def create(self, model, messages):
+                self.calls.append({"model": model, "messages": messages})
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(content="那聊当前这个")
+                        )
+                    ]
+                )
+
+        class FakeMatcher:
+            def __init__(self):
+                self.messages = []
+
+            async def finish(self, message):
+                self.messages.append(message)
+
+        async def empty_prompt(*args, **kwargs):
+            return ""
+
+        async def empty_records(*args, **kwargs):
+            return []
+
+        async def run_test():
+            with tempfile.TemporaryDirectory() as temp_dir:
+                database_path = Path(temp_dir) / "memory.db"
+                store = LongTermMemoryStore(database_path, use_wal=False)
+                session_key = ("group", 12345, 10000)
+                await store.upsert_summary(
+                    session_key,
+                    "事项：很久以前在准备考试",
+                )
+
+                stale_updated_at = (
+                    datetime.now(timezone.utc)
+                    - LONG_TERM_MEMORY_INJECTION_TTL
+                    - timedelta(seconds=1)
+                )
+                with closing(sqlite3.connect(database_path)) as connection:
+                    with connection:
+                        connection.execute(
+                            "UPDATE chat_memory SET updated_at = ?",
+                            (stale_updated_at.isoformat(),),
+                        )
+
+                completions = FakeCompletions()
+                fake_client = SimpleNamespace(
+                    chat=SimpleNamespace(completions=completions)
+                )
+                event = SimpleNamespace(
+                    user_id=12345,
+                    group_id=10000,
+                    get_plaintext=lambda: "现在聊点别的",
+                    get_message=lambda: Message("现在聊点别的"),
+                )
+
+                original_client = claude_chat.client
+                original_store = claude_chat.memory_store
+                original_get_user_title_prompt = claude_chat.get_user_title_prompt
+                original_get_mentioned_title_records = (
+                    claude_chat.get_mentioned_title_records
+                )
+                original_get_mentioned_titles_prompt = (
+                    claude_chat.get_mentioned_titles_prompt
+                )
+                claude_chat.client = fake_client
+                claude_chat.memory_store = store
+                claude_chat.get_user_title_prompt = empty_prompt
+                claude_chat.get_mentioned_title_records = empty_records
+                claude_chat.get_mentioned_titles_prompt = empty_prompt
+                try:
+                    await claude_chat.process_chat_locked(
+                        FakeMatcher(),
+                        SimpleNamespace(),
+                        event,
+                        session_key,
+                    )
+                finally:
+                    claude_chat.client = original_client
+                    claude_chat.memory_store = original_store
+                    claude_chat.get_user_title_prompt = original_get_user_title_prompt
+                    claude_chat.get_mentioned_title_records = (
+                        original_get_mentioned_title_records
+                    )
+                    claude_chat.get_mentioned_titles_prompt = (
+                        original_get_mentioned_titles_prompt
+                    )
+
+                system_prompt = completions.calls[0]["messages"][0]["content"]
+                self.assertNotIn("当前会话的长期记忆摘要", system_prompt)
+                self.assertNotIn("很久以前在准备考试", system_prompt)
 
         asyncio.run(run_test())
 
@@ -452,6 +607,53 @@ class ClaudeChatRuntimeCleanupTest(unittest.TestCase):
         asyncio.run(run_test())
 
 
+class ClaudeChatByeHandlerTest(unittest.TestCase):
+    def tearDown(self):
+        active_users.clear()
+        user_modes.clear()
+        user_roles.clear()
+        quiz_answers.clear()
+        user_history.clear()
+        session_locks.clear()
+        session_last_seen.clear()
+
+    def test_handle_bye_clears_state_and_uses_natural_message(self):
+        class FakeByeChat:
+            def __init__(self):
+                self.messages = []
+
+            async def finish(self, message):
+                self.messages.append(message)
+
+        async def run_test():
+            event = SimpleNamespace(user_id=12345, group_id=10000)
+            session_key = conversation_key(event)
+            active_users.add(session_key)
+            user_modes[session_key] = "roleplay"
+            user_roles[session_key] = "role prompt"
+            user_history[session_key] = [{"role": "user", "content": "bye"}]
+            session_last_seen[session_key] = 1.0
+
+            fake_bye_chat = FakeByeChat()
+            original_bye_chat = claude_chat.bye_chat
+            claude_chat.bye_chat = fake_bye_chat
+            try:
+                await claude_chat.handle_bye(event)
+            finally:
+                claude_chat.bye_chat = original_bye_chat
+
+            self.assertEqual(fake_bye_chat.messages, ["👋 再见，回头聊。"])
+            self.assertNotIn(session_key, active_users)
+            self.assertNotIn(session_key, user_modes)
+            self.assertNotIn(session_key, user_roles)
+            self.assertNotIn(session_key, user_history)
+            self.assertNotIn(session_key, session_last_seen)
+            self.assertNotIn("你好", fake_bye_chat.messages[0])
+            self.assertNotIn("找我", fake_bye_chat.messages[0])
+
+        asyncio.run(run_test())
+
+
 class ClaudeChatMemoryUpdateTest(unittest.TestCase):
     def tearDown(self):
         memory_update_generations.clear()
@@ -488,7 +690,7 @@ class ClaudeChatMemoryUpdateTest(unittest.TestCase):
             def __init__(self):
                 self.writes = []
 
-            async def get_summary(self, session_key):
+            async def get_injectable_summary(self, session_key):
                 return "旧摘要"
 
             async def upsert_summary(self, session_key, summary):

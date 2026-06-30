@@ -2,7 +2,8 @@ import asyncio
 import re
 import sqlite3
 from contextlib import closing
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -13,6 +14,9 @@ DATABASE_PATH = Path("data") / "chat_memory.db"
 MAX_LONG_TERM_MEMORY_CHARS = 500
 MAX_LONG_TERM_MEMORY_ITEMS = 5
 MAX_LONG_TERM_MEMORY_LINE_CHARS = 80
+LONG_TERM_MEMORY_INJECTION_TTL_DAYS = 30
+LONG_TERM_MEMORY_INJECTION_TTL = timedelta(days=LONG_TERM_MEMORY_INJECTION_TTL_DAYS)
+_UPDATED_AT_UNSET = object()
 
 _EMPTY_MEMORY_LINES = {
     "",
@@ -127,6 +131,46 @@ _STYLE_NEGATION_WORDS = (
 )
 
 
+@dataclass(frozen=True, slots=True)
+class LongTermMemoryRecord:
+    summary: str
+    updated_at: datetime | None
+
+
+def _to_utc_datetime(value: datetime) -> datetime:
+    if value.tzinfo is None:
+        return value.replace(tzinfo=timezone.utc)
+    return value.astimezone(timezone.utc)
+
+
+def parse_memory_updated_at(updated_at: Any) -> datetime | None:
+    if isinstance(updated_at, datetime):
+        return _to_utc_datetime(updated_at)
+
+    text = str(updated_at or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = f"{text[:-1]}+00:00"
+
+    try:
+        return _to_utc_datetime(datetime.fromisoformat(text))
+    except ValueError:
+        return None
+
+
+def should_inject_long_term_memory(
+    updated_at: Any,
+    now: datetime | None = None,
+) -> bool:
+    updated_time = parse_memory_updated_at(updated_at)
+    if updated_time is None:
+        return False
+
+    current_time = _to_utc_datetime(now or datetime.now(timezone.utc))
+    return current_time - updated_time <= LONG_TERM_MEMORY_INJECTION_TTL
+
+
 class LongTermMemoryStore:
     """基于 SQLite 的会话长期记忆摘要存储。"""
 
@@ -171,21 +215,58 @@ class LongTermMemoryStore:
         scope_type, user_id, group_id = session_key
         return scope_type, user_id, group_id or 0
 
-    def _get_summary(self, session_key: SessionKey) -> str:
+    def _get_record(self, session_key: SessionKey) -> LongTermMemoryRecord | None:
         with closing(self._connect()) as connection:
             row = connection.execute(
                 """
-                SELECT summary
+                SELECT summary, updated_at
                 FROM chat_memory
                 WHERE scope_type = ? AND user_id = ? AND group_id = ?
                 """,
                 self._row_key(session_key),
             ).fetchone()
-        return str(row["summary"]) if row else ""
+        if row is None:
+            return None
+        return LongTermMemoryRecord(
+            summary=str(row["summary"]),
+            updated_at=parse_memory_updated_at(row["updated_at"]),
+        )
+
+    async def get_record(self, session_key: SessionKey) -> LongTermMemoryRecord | None:
+        await self.initialize()
+        return await asyncio.to_thread(self._get_record, session_key)
+
+    def _get_summary(self, session_key: SessionKey) -> str:
+        record = self._get_record(session_key)
+        return record.summary if record else ""
 
     async def get_summary(self, session_key: SessionKey) -> str:
         await self.initialize()
         return await asyncio.to_thread(self._get_summary, session_key)
+
+    def _get_injectable_summary(
+        self,
+        session_key: SessionKey,
+        now: datetime | None,
+    ) -> str:
+        record = self._get_record(session_key)
+        if record is None:
+            return ""
+        if not should_inject_long_term_memory(record.updated_at, now):
+            return ""
+        return record.summary
+
+    async def get_injectable_summary(
+        self,
+        session_key: SessionKey,
+        now: datetime | None = None,
+    ) -> str:
+        await self.initialize()
+        return await asyncio.to_thread(
+            self._get_injectable_summary,
+            session_key,
+            now,
+        )
 
     def _upsert_summary(self, session_key: SessionKey, summary: str) -> None:
         normalized = normalize_memory_summary(summary)
@@ -295,7 +376,17 @@ def normalize_memory_summary(summary: str) -> str:
     return normalized[:MAX_LONG_TERM_MEMORY_CHARS].rstrip()
 
 
-def build_long_term_memory_prompt(summary: str) -> str:
+def build_long_term_memory_prompt(
+    summary: str,
+    updated_at: Any = _UPDATED_AT_UNSET,
+    now: datetime | None = None,
+) -> str:
+    if (
+        updated_at is not _UPDATED_AT_UNSET
+        and not should_inject_long_term_memory(updated_at, now)
+    ):
+        return ""
+
     normalized = normalize_memory_summary(summary)
     if not normalized:
         return ""
