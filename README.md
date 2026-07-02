@@ -156,8 +156,10 @@ ws://127.0.0.1:8080/onebot/v11/ws
 | `VOICE_AI_CHARACTER` | 否 | 群角色列表第一个 | QQ AI 声聊默认角色 ID |
 | `VOICE_EDGE_VOICE` | 否 | `zh-CN-XiaoxiaoNeural` | edge-tts 在线合成默认音色 |
 | `VOICE_MAX_TEXT_LEN` | 否 | `200` | 单条语音的最大文本长度 |
+| `VOICE_COMMAND_COOLDOWN` | 否 | `10` | 同一会话触发 `/语音` 的冷却秒数，设为 `0` 可关闭 |
 | `MUSIC_API_BASE_URL` | 否 | 空 | 兼容 NeteaseCloudMusicApi（Binaryify）协议的搜索服务地址，留空则 `/点歌` 只支持直接发 ID/链接 |
 | `MUSIC_MAX_SIZE_MB` | 否 | `15` | `/点歌` 单曲下载大小上限（MB） |
+| `MUSIC_COMMAND_COOLDOWN` | 否 | `30` | 同一会话触发 `/点歌` 的冷却秒数，设为 `0` 可关闭 |
 
 当前 AI 模型可通过 `.env` 中的 `OPENAI_MODEL` 设置；使用兼容服务时，应填写该服务实际提供的模型名称。
 

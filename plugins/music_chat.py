@@ -18,6 +18,7 @@ from nonebot import get_driver, on_command
 from nonebot.adapters.onebot.v11 import Message, MessageEvent, MessageSegment
 from nonebot.log import logger
 from nonebot.params import CommandArg
+from plugins.command_cooldown import SessionCooldown
 
 config = get_driver().config
 
@@ -39,10 +40,20 @@ def _read_int(name: str, default: int) -> int:
         return default
 
 
+def _read_float(name: str, default: float) -> float:
+    value = getattr(config, name, default)
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        logger.warning("配置 {}={} 无效，使用默认值 {}", name.upper(), value, default)
+        return default
+
+
 MUSIC_API_BASE_URL = _read_str("music_api_base_url", None)
 if MUSIC_API_BASE_URL:
     MUSIC_API_BASE_URL = MUSIC_API_BASE_URL.rstrip("/")
 MUSIC_MAX_SIZE_BYTES = _read_int("music_max_size_mb", 15) * 1024 * 1024
+MUSIC_COMMAND_COOLDOWN = _read_float("music_command_cooldown", 30.0)
 
 MIN_AUDIO_BYTES = 50 * 1024  # 低于这个大小的响应视为下架/会员占位音频
 
@@ -50,6 +61,7 @@ DOWNLOAD_TIMEOUT = httpx.Timeout(30.0)
 DOWNLOAD_HEADERS = {"Referer": "https://music.163.com/"}
 
 SONG_ID_PATTERN = re.compile(r"id=(\d+)")
+music_cooldown = SessionCooldown(MUSIC_COMMAND_COOLDOWN)
 
 
 def parse_song_id(text: str) -> int | None:
@@ -63,6 +75,13 @@ def parse_song_id(text: str) -> int | None:
     if match:
         return int(match.group(1))
     return None
+
+
+def music_session_key(event: MessageEvent) -> tuple:
+    group_id = getattr(event, "group_id", None)
+    if group_id is not None:
+        return ("group", group_id)
+    return ("private", event.user_id)
 
 
 def build_direct_download_url(song_id: int) -> str:
@@ -117,6 +136,16 @@ def validate_audio_response(content_type: str | None, size: int, max_bytes: int)
     return MIN_AUDIO_BYTES <= size <= max_bytes
 
 
+def parse_content_length(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        length = int(value)
+    except ValueError:
+        return None
+    return length if length >= 0 else None
+
+
 async def search_song(client: httpx.AsyncClient, keyword: str) -> tuple[int, str] | None:
     response = await client.get(
         f"{MUSIC_API_BASE_URL}/search", params={"keywords": keyword, "limit": 1}
@@ -142,12 +171,25 @@ async def resolve_playable_url(client: httpx.AsyncClient, song_id: int) -> str:
 
 
 async def download_audio(client: httpx.AsyncClient, url: str) -> bytes | None:
-    response = await client.get(url, headers=DOWNLOAD_HEADERS)
-    content = response.content
-    content_type = response.headers.get("content-type")
+    async with client.stream("GET", url, headers=DOWNLOAD_HEADERS) as response:
+        response.raise_for_status()
+        content_type = response.headers.get("content-type")
+        content_length = parse_content_length(response.headers.get("content-length"))
+
+        if content_length is not None and content_length > MUSIC_MAX_SIZE_BYTES:
+            return None
+        if not content_type or not content_type.lower().startswith("audio"):
+            return None
+
+        content = bytearray()
+        async for chunk in response.aiter_bytes():
+            content.extend(chunk)
+            if len(content) > MUSIC_MAX_SIZE_BYTES:
+                return None
+
     if not validate_audio_response(content_type, len(content), MUSIC_MAX_SIZE_BYTES):
         return None
-    return content
+    return bytes(content)
 
 
 point_song_cmd = on_command("点歌", priority=3, block=True)
@@ -161,16 +203,20 @@ async def handle_point_song(event: MessageEvent, arg: Message = CommandArg()):
 
     song_label: str | None = None
     song_id = parse_song_id(text)
+    if song_id is None and not MUSIC_API_BASE_URL:
+        await point_song_cmd.finish(
+            "❌ 未配置搜索源，请直接发送网易云歌曲 ID 或分享链接"
+            "（如 https://music.163.com/song?id=xxxxx）"
+        )
+
+    retry_after = music_cooldown.retry_after(music_session_key(event))
+    if retry_after is not None:
+        await point_song_cmd.finish(f"点歌太频繁了，请 {retry_after} 秒后再试")
 
     async with httpx.AsyncClient(
         follow_redirects=True, timeout=DOWNLOAD_TIMEOUT
     ) as client:
         if song_id is None:
-            if not MUSIC_API_BASE_URL:
-                await point_song_cmd.finish(
-                    "❌ 未配置搜索源，请直接发送网易云歌曲 ID 或分享链接"
-                    "（如 https://music.163.com/song?id=xxxxx）"
-                )
             try:
                 result = await search_song(client, text)
             except httpx.HTTPError as error:

@@ -1,11 +1,26 @@
 import unittest
 
+import httpx
 import nonebot
 
 
 nonebot.init()
 
 import plugins.music_chat as music_chat  # noqa: E402
+
+
+class CountingStream(httpx.AsyncByteStream):
+    def __init__(self, chunks):
+        self.chunks = chunks
+        self.iterated_chunks = 0
+
+    async def __aiter__(self):
+        for chunk in self.chunks:
+            self.iterated_chunks += 1
+            yield chunk
+
+    async def aclose(self):
+        pass
 
 
 class ParseSongIdTest(unittest.TestCase):
@@ -125,6 +140,69 @@ class ValidateAudioResponseTest(unittest.TestCase):
                 "audio/mpeg", 20 * 1024 * 1024, 15 * 1024 * 1024
             )
         )
+
+
+class ParseContentLengthTest(unittest.TestCase):
+    def test_parses_valid_content_length(self):
+        self.assertEqual(music_chat.parse_content_length("123"), 123)
+
+    def test_ignores_missing_invalid_or_negative_content_length(self):
+        self.assertIsNone(music_chat.parse_content_length(None))
+        self.assertIsNone(music_chat.parse_content_length("abc"))
+        self.assertIsNone(music_chat.parse_content_length("-1"))
+
+
+class DownloadAudioTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        self._max_size = music_chat.MUSIC_MAX_SIZE_BYTES
+
+    def tearDown(self):
+        music_chat.MUSIC_MAX_SIZE_BYTES = self._max_size
+
+    async def test_downloads_audio_within_limit(self):
+        music_chat.MUSIC_MAX_SIZE_BYTES = 100 * 1024
+        audio = b"a" * (60 * 1024)
+        stream = CountingStream([audio])
+
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"content-type": "audio/mpeg"},
+                stream=stream,
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            self.assertEqual(await music_chat.download_audio(client, "https://test"), audio)
+
+    async def test_rejects_oversized_content_length_without_reading_body(self):
+        music_chat.MUSIC_MAX_SIZE_BYTES = 100
+        stream = CountingStream([b"a" * 101])
+
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"content-type": "audio/mpeg", "content-length": "101"},
+                stream=stream,
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            self.assertIsNone(await music_chat.download_audio(client, "https://test"))
+        self.assertEqual(stream.iterated_chunks, 0)
+
+    async def test_stops_stream_when_body_exceeds_limit(self):
+        music_chat.MUSIC_MAX_SIZE_BYTES = 100
+        stream = CountingStream([b"a" * 80, b"b" * 21, b"c"])
+
+        transport = httpx.MockTransport(
+            lambda request: httpx.Response(
+                200,
+                headers={"content-type": "audio/mpeg"},
+                stream=stream,
+            )
+        )
+        async with httpx.AsyncClient(transport=transport) as client:
+            self.assertIsNone(await music_chat.download_audio(client, "https://test"))
+        self.assertEqual(stream.iterated_chunks, 2)
 
 
 if __name__ == "__main__":

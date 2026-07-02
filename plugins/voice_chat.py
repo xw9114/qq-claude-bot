@@ -13,6 +13,7 @@ from nonebot.adapters.onebot.v11 import Bot, Message, MessageEvent, MessageSegme
 from nonebot.adapters.onebot.v11.exception import ActionFailed, NetworkError
 from nonebot.log import logger
 from nonebot.params import CommandArg
+from plugins.command_cooldown import SessionCooldown
 
 try:
     import edge_tts
@@ -39,9 +40,19 @@ def _read_int(name: str, default: int) -> int:
         return default
 
 
+def _read_float(name: str, default: float) -> float:
+    value = getattr(config, name, default)
+    try:
+        return max(0.0, float(value))
+    except (TypeError, ValueError):
+        logger.warning("配置 {}={} 无效，使用默认值 {}", name.upper(), value, default)
+        return default
+
+
 DEFAULT_AI_CHARACTER = _read_str("voice_ai_character", None)
 DEFAULT_EDGE_VOICE = _read_str("voice_edge_voice", "zh-CN-XiaoxiaoNeural")
 MAX_TEXT_LENGTH = _read_int("voice_max_text_len", 200)
+VOICE_COMMAND_COOLDOWN = _read_float("voice_command_cooldown", 10.0)
 
 # QQ AI 声聊角色列表是群维度数据，拉取一次后短期复用，避免每条语音都发包
 AI_CHARACTER_CACHE_TTL = 10 * 60
@@ -60,6 +71,7 @@ EDGE_VOICES = {
 group_ai_characters: dict[int, str] = {}   # 群 -> QQ AI 声聊角色 ID
 session_edge_voices: dict[tuple, str] = {}  # 会话 -> edge-tts 音色
 _ai_character_cache: dict[int, tuple[float, list]] = {}
+voice_cooldown = SessionCooldown(VOICE_COMMAND_COOLDOWN)
 
 
 def voice_session_key(event: MessageEvent) -> tuple:
@@ -184,6 +196,10 @@ async def handle_voice(bot: Bot, event: MessageEvent, arg: Message = CommandArg(
         await voice_cmd.finish("用法：/语音 [要说的话]")
     if len(text) > MAX_TEXT_LENGTH:
         await voice_cmd.finish(f"❌ 文本太长了，最多 {MAX_TEXT_LENGTH} 字")
+
+    retry_after = voice_cooldown.retry_after(voice_session_key(event))
+    if retry_after is not None:
+        await voice_cmd.finish(f"语音太频繁了，请 {retry_after} 秒后再试")
 
     group_id = getattr(event, "group_id", None)
     if group_id is not None:
