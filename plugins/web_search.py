@@ -56,8 +56,19 @@ WEB_SEARCH_HEADERS = {
     )
 }
 
+QUICK_WEB_SEARCH_PREFIXES = (
+    "联网搜索",
+    "联网查一下",
+    "联网查一查",
+    "帮我搜一下",
+    "查一下",
+    "查一查",
+    "搜一下",
+    "联网",
+    "搜索",
+)
 QUICK_WEB_SEARCH_REGEX = (
-    r"^(?:联网(?:搜索|查一下|查一查)?|搜索|搜一下|查一下|查一查|帮我搜一下)\s*(\S.*)$"
+    r"^(?:联网搜索|联网查一下|联网查一查|帮我搜一下|查一下|查一查|搜一下|联网(?!搜索|查一下|查一查)|搜索)\s*(\S.*)$"
 )
 QUICK_WEB_SEARCH_PATTERN = re.compile(QUICK_WEB_SEARCH_REGEX)
 web_search_cooldown = SessionCooldown(WEB_SEARCH_COMMAND_COOLDOWN)
@@ -180,11 +191,13 @@ def build_duckduckgo_search_url(query: str) -> str:
 
 
 def parse_quick_web_search(text: str) -> str | None:
-    match = QUICK_WEB_SEARCH_PATTERN.fullmatch(text.strip())
-    if not match:
-        return None
-    query = match.group(1).strip()
-    return query or None
+    message = text.strip()
+    for prefix in QUICK_WEB_SEARCH_PREFIXES:
+        if not message.startswith(prefix):
+            continue
+        query = message[len(prefix):].strip()
+        return query or None
+    return None
 
 
 def web_search_session_key(event: MessageEvent) -> tuple:

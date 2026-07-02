@@ -79,6 +79,10 @@ class WebSearchCommandParseTest(unittest.TestCase):
             "张雪峰",
         )
         self.assertEqual(
+            web_search.parse_quick_web_search("联网搜索张雪峰"),
+            "张雪峰",
+        )
+        self.assertEqual(
             web_search.parse_quick_web_search("联网查一下 今天新闻"),
             "今天新闻",
         )
@@ -89,6 +93,12 @@ class WebSearchCommandParseTest(unittest.TestCase):
 
     def test_slash_command_is_left_to_command_handler(self):
         self.assertIsNone(web_search.parse_quick_web_search("/联网 Python"))
+
+    def test_combined_prefix_without_query_is_not_treated_as_query(self):
+        self.assertIsNone(web_search.parse_quick_web_search("联网搜索"))
+        self.assertIsNone(web_search.QUICK_WEB_SEARCH_PATTERN.fullmatch("联网搜索"))
+        self.assertIsNone(web_search.parse_quick_web_search("联网查一下"))
+        self.assertIsNone(web_search.QUICK_WEB_SEARCH_PATTERN.fullmatch("联网查一下"))
 
 
 class WebAnswerPromptTest(unittest.TestCase):
